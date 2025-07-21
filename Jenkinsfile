@@ -1,17 +1,48 @@
 pipeline {
-    agent any
+    agent {
+        kubernetes {
+            yaml """
+apiVersion: v1
+kind: Pod
+spec:
+  containers:
+  - name: build
+    image: python:3.10
+    command:
+    - cat
+    tty: true
+  - name: docker
+    image: docker:25.0.3-cli
+    command:
+    - cat
+    tty: true
+    volumeMounts:
+    - name: dockersock
+      mountPath: /var/run/docker.sock
+  - name: helm
+    image: alpine/helm:3.14.4
+    command:
+    - cat
+    tty: true
+  volumes:
+  - name: dockersock
+    hostPath:
+      path: /var/run/docker.sock
+"""
+        }
+    }
 
     environment {
         DOCKER_IMAGE = "spavankumar1234/flask-cicd-app"
         DOCKER_CREDENTIALS = 'docker-creds'
         SONARQUBE_ENV = 'SonarQube'
-        SLACK_WEBHOOK_URL = "https://hooks.slack.com/services/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"
+        SLACK_WEBHOOK_URL = credentials('slack-webhook') // secure Slack webhook
     }
 
     stages {
         stage('Clone Code from GitHub') {
             steps {
-                git credentialsId: 'git-creds', url: 'https://github.com/spavankumar1234/flask-cicd-app.git', branch: 'main'
+                git url: 'https://github.com/spavankumar1234/flask-cicd-app.git', branch: 'main'
             }
         }
 
@@ -26,23 +57,27 @@ pipeline {
                 scannerHome = tool 'SonarQubeScanner'
             }
             steps {
-                withSonarQubeEnv(SONARQUBE_ENV) {
-                    sh 'sonar-scanner'
+                withSonarQubeEnv("${SONARQUBE_ENV}") {
+                    sh '${scannerHome}/bin/sonar-scanner'
                 }
             }
         }
 
         stage('Build Docker Image') {
             steps {
-                sh "docker build -t ${DOCKER_IMAGE}:${BUILD_NUMBER} ."
+                container('docker') {
+                    sh "docker build -t ${DOCKER_IMAGE}:${BUILD_NUMBER} ."
+                }
             }
         }
 
         stage('Push Docker Image to DockerHub') {
             steps {
-                script {
-                    docker.withRegistry('https://index.docker.io/v1/', DOCKER_CREDENTIALS) {
-                        sh "docker push ${DOCKER_IMAGE}:${BUILD_NUMBER}"
+                container('docker') {
+                    script {
+                        docker.withRegistry('https://index.docker.io/v1/', "${DOCKER_CREDENTIALS}") {
+                            sh "docker push ${DOCKER_IMAGE}:${BUILD_NUMBER}"
+                        }
                     }
                 }
             }
@@ -50,11 +85,13 @@ pipeline {
 
         stage('Deploy to Kubernetes using Helm') {
             steps {
-                sh """
-                helm upgrade --install flask-app ./helm-chart \
-                    --set image.repository=${DOCKER_IMAGE} \
-                    --set image.tag=${BUILD_NUMBER}
-                """
+                container('helm') {
+                    sh """
+                    helm upgrade --install flask-app ./helm-chart \
+                        --set image.repository=${DOCKER_IMAGE} \
+                        --set image.tag=${BUILD_NUMBER}
+                    """
+                }
             }
         }
     }
@@ -64,14 +101,14 @@ pipeline {
             sh """
             curl -X POST -H 'Content-type: application/json' \
             --data '{"text":"✅ Jenkins Build #${BUILD_NUMBER} succeeded and deployed!"}' \
-            ${SLACK_WEBHOOK_URL}
+            "${SLACK_WEBHOOK_URL}"
             """
         }
         failure {
             sh """
             curl -X POST -H 'Content-type: application/json' \
             --data '{"text":"❌ Jenkins Build #${BUILD_NUMBER} failed. Please check the Jenkins logs."}' \
-            ${SLACK_WEBHOOK_URL}
+            "${SLACK_WEBHOOK_URL}"
             """
         }
     }
